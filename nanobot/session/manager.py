@@ -662,6 +662,7 @@ class SessionManager:
             os.replace(tmp_path, path)
 
             if fsync:
+                # 同步目录
                 # fsync the directory so the rename is durable.
                 # On Windows, opening a directory with O_RDONLY raises
                 # PermissionError — skip the dir sync there (NTFS
@@ -675,7 +676,7 @@ class SessionManager:
         except BaseException:
             tmp_path.unlink(missing_ok=True)
             raise
-
+        # 更新本地缓存
         self._cache[session.key] = session
 
     def flush_all(self) -> int:

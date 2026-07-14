@@ -88,14 +88,14 @@ if TYPE_CHECKING:
     from nanobot.cron.service import CronService
 
 class TurnState(Enum):
-    RESTORE = auto()
-    COMPACT = auto()
-    COMMAND = auto()
-    BUILD = auto()
-    RUN = auto()
-    SAVE = auto()
-    RESPOND = auto()
-    DONE = auto()
+    RESTORE = auto()   # 恢复检查点
+    COMPACT = auto()   # 压缩/归档旧历史
+    COMMAND = auto()   # 判断是否命令
+    BUILD = auto()     # 构建 LLM 消息
+    RUN = auto()       # 调用 LLM + 执行工具
+    SAVE = auto()      # 保存会话历史
+    RESPOND = auto()   # 组装响应
+    DONE = auto()      # 完成
 
 
 @dataclass
@@ -160,6 +160,8 @@ class AgentLoop:
     3. Calls the LLM
     4. Executes tool calls
     5. Sends responses back
+    智能体主循环 - 从 MessageBus 消费消息，创建 AgentRunner 处理。
+    管理会话锁和全局并发控制。
     """
 
     @property
@@ -180,6 +182,9 @@ class AgentLoop:
 
     # Event-driven state transition table.
     # Handlers return an event string; the driver looks up the next state here.
+    # 状态机转移表（数据流主干）：(当前状态, 事件) → 下一状态。
+    # 一条消息的正常路径：RESTORE→COMPACT→COMMAND→BUILD→RUN→SAVE→RESPOND→DONE。
+    # 当 COMMAND 命中斜杠命令时走 "shortcut" 直接到 DONE（跳过 BUILD/RUN/SAVE）。
     _TRANSITIONS: dict[tuple[TurnState, str], TurnState] = {
         (TurnState.RESTORE, "ok"): TurnState.COMPACT,
         (TurnState.COMPACT, "ok"): TurnState.COMMAND,
@@ -315,10 +320,10 @@ class AgentLoop:
         self._mcp_connecting = False
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._background_tasks: list[asyncio.Task] = []
+        # 会话锁：确保同一会话的消息串行处理
         self._session_locks: dict[str, asyncio.Lock] = {}
-        # Per-session pending queues for mid-turn message injection.
-        # When a session has an active task, new messages for that session
-        # are routed here instead of creating a new task.
+        # 每个会话的中途消息注入待处理队列。
+        # 当一个会话有一个活动任务时，该会话的新消息会被路由到这里，而不是创建一个新的任务。
         self._pending_queues: dict[str, asyncio.Queue] = {}
         self._deferred_automation_turns: dict[str, list[InboundMessage]] = {}
         self._cron_turns = CronTurnCoordinator(
@@ -337,7 +342,7 @@ class AgentLoop:
             ("cron", self._cron_turns),
             ("local trigger", self._local_trigger_turns),
         )
-        # NANOBOT_MAX_CONCURRENT_REQUESTS: <=0 means unlimited; default 3.
+        # 控制全局最多同时处理的会话数 NANOBOT_MAX_CONCURRENT_REQUESTS: <=0 means unlimited; default 3.
         _max = int(os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS", "3"))
         self._concurrency_gate: asyncio.Semaphore | None = (
             asyncio.Semaphore(_max) if _max > 0 else None
@@ -707,6 +712,7 @@ class AgentLoop:
 
     def _effective_session_key(self, msg: InboundMessage) -> str:
         """Return the session key used for task routing and mid-turn injections."""
+        # 
         if self._unified_session and not msg.session_key_override:
             return UNIFIED_SESSION_KEY
         return msg.session_key
@@ -871,6 +877,8 @@ class AgentLoop:
 
         session_metadata = session.metadata if session is not None else None
         try:
+            # 数据流关键交接：把组装好的消息 + 工具集 + 各种回调打包成 AgentRunSpec，
+            # 交给 self.runner（AgentRunner）执行 —— runner.py 的核心对话循环从这里开始。
             result = await self.runner.run(AgentRunSpec(
                 initial_messages=initial_messages,
                 tools=tools or self.tools,
@@ -937,6 +945,7 @@ class AgentLoop:
 
             while self._running:
                 try:
+                    # 从消息总线获取消息，最多等 1 秒
                     msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
                 except asyncio.TimeoutError:
                     self.auto_compact.check_expired(
@@ -956,6 +965,7 @@ class AgentLoop:
 
                 raw = msg.content.strip()
                 effective_key = self._effective_session_key(msg)
+                # MCP 热重载
                 if await agent_context.handle_runtime_control(self, msg, self.tools):
                     continue
                 if self.commands.is_priority(raw):
@@ -980,9 +990,8 @@ class AgentLoop:
                         break
                 if deferred:
                     continue
-                # If this session already has an active pending queue (i.e. a task
-                # is processing this session), route the message there for mid-turn
-                # injection instead of creating a competing task.
+                # 如果这个会话已经有活跃的等待队列（即有一个任务正在处理这个会话）
+                # 将消息路由到该队列进行中途注入，而不是创建竞争任务。
                 if effective_key in self._pending_queues:
                     # Non-priority commands must not be queued for injection;
                     # dispatch them directly (same pattern as priority commands).
@@ -1027,6 +1036,8 @@ class AgentLoop:
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message: per-session serial, cross-session concurrent."""
+        # 数据流：本方法是“一条消息”的处理入口。它拿会话锁（保证同一会话串行、
+        # 跨会话并发）、建立流式回调和中途注入队列，然后把活交给 _process_message。
         session_key = self._effective_session_key(msg)
         if session_key != msg.session_key:
             msg = dataclasses.replace(msg, session_key_override=session_key)
@@ -1038,8 +1049,11 @@ class AgentLoop:
             async with lock, gate:
                 # Only the task that owns the session lock may publish the
                 # active mid-turn injection queue for this session.
+                # 这里是防止用户在不同设备同时在一个会话发消息，会在队列中等待 
+                # uid + 会话id
                 pending = asyncio.Queue(maxsize=20)
                 self._pending_queues[session_key] = pending
+                # 设置流式响应回调
                 try:
                     on_stream = on_stream_end = None
                     if msg.metadata.get("_wants_stream"):
@@ -1077,11 +1091,12 @@ class AgentLoop:
                                 )
                             )
                             stream_segment += 1
-
+                    # 核心处理
                     response = await self._process_message(
                         msg, on_stream=on_stream, on_stream_end=on_stream_end,
                         pending_queue=pending,
                     )
+                    # 发布响应
                     completed_channel = msg.channel
                     completed_chat_id = msg.chat_id
                     if response is not None:
@@ -1224,11 +1239,13 @@ class AgentLoop:
         logger.info("Processing system message from {}", msg.sender_id)
         key = msg.session_key_override or f"{channel}:{chat_id}"
         session = self.sessions.get_or_create(key)
+        # 恢复会话历史上下文
         if self._restore_runtime_checkpoint(session):
             self.sessions.save(session)
+        # 系统被动崩溃时，追加一条错误信息
         if self._restore_pending_user_turn(session):
             self.sessions.save(session)
-
+        # 是否自动压缩
         session, pending = self.auto_compact.prepare_session(session, key)
         if pending:
             logger.info("Memory compact triggered for session {}", key)
@@ -1320,6 +1337,9 @@ class AgentLoop:
         tools: ToolRegistry | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
+        # 数据流核心：构造一个 TurnContext（本轮状态容器），然后用状态机驱动它走过
+        # RESTORE→COMPACT→COMMAND→BUILD→RUN→SAVE→RESPOND→DONE。每个状态对应一个
+        # _state_xxx 方法，返回事件(如 "ok")，再由 _TRANSITIONS 表决定下一跳。
         self._refresh_provider_snapshot()
 
         if msg.channel == "system":
@@ -1334,6 +1354,7 @@ class AgentLoop:
 
         key = session_key or msg.session_key
         t0 = time.time()
+        # 创建 TurnContext（状态容器）
         ctx = TurnContext(
             msg=msg,
             session=None,
@@ -1353,7 +1374,7 @@ class AgentLoop:
             hooks=list(hooks or []),
             tools=tools,
         )
-
+        # 状态机循环
         while ctx.state is not TurnState.DONE:
             handler_name = f"_state_{ctx.state.name.lower()}"
             handler = getattr(self, handler_name, None)
@@ -1445,8 +1466,9 @@ class AgentLoop:
 
     async def _state_restore(self, ctx: TurnContext) -> TurnState:
         """Restore checkpoint / pending user turn; extract documents."""
+        # 状态 RESTORE（状态机第一站）：提取附件文本、恢复运行检查点/挂起的用户轮次。
         msg = ctx.msg
-
+        # 如果用户发送了图片、PDF、Word 等附件，提取附件中的文本内容（如果是文档）
         if msg.media:
             new_content, image_only = self._prepare_message_media(msg.content, msg.media)
             ctx.msg = dataclasses.replace(msg, content=new_content, media=image_only)
@@ -1461,9 +1483,9 @@ class AgentLoop:
             ctx.session = self.sessions.get_or_create(ctx.session_key)
         await self._runtime_events().session_turn_started(msg, ctx.session_key)
         self.workspace_scopes.persist_message_scope(ctx.session, msg)
-
+        # 恢复运行的检查点
         if self._restore_runtime_checkpoint(ctx.session):
-            self.sessions.save(ctx.session)
+            self.sessions.save(ctx.session)   # 持久化
         if self._restore_pending_user_turn(ctx.session):
             self.sessions.save(ctx.session)
 
@@ -1480,11 +1502,14 @@ class AgentLoop:
         return self.channels_config.extract_document_text
 
     async def _state_compact(self, ctx: TurnContext) -> str:
+        # 状态 COMPACT：检查历史是否需要压缩/归档，避免上下文超限。返回待处理的摘要。
         ctx.session, pending = self.auto_compact.prepare_session(ctx.session, ctx.session_key)
         ctx.pending_summary = pending
         return "ok"
 
     async def _state_command(self, ctx: TurnContext) -> str:
+        # 状态 COMMAND：判断是不是斜杠命令。是命令→直接执行并 "shortcut" 跳到 DONE；
+        # 否→返回 "dispatch" 进入 BUILD，去走 LLM。
         raw = ctx.msg.content.strip()
         cmd_ctx = CommandContext(
             msg=ctx.msg, session=ctx.session, key=ctx.session_key, raw=raw, loop=self
@@ -1510,6 +1535,7 @@ class AgentLoop:
         return "dispatch"
 
     async def _state_build(self, ctx: TurnContext) -> str:
+        # 状态 BUILD：组装发给 LLM 的消息列表——历史 + 系统提示 + 记忆/技能 + 本轮用户消息。
         if not ctx.ephemeral:
             await self.consolidator.maybe_consolidate_by_tokens(
                 ctx.session,
@@ -1556,6 +1582,8 @@ class AgentLoop:
         return "ok"
 
     async def _state_run(self, ctx: TurnContext) -> str:
+        # 状态 RUN：把组装好的消息交给 _run_agent_loop → AgentRunner.run()，
+        # 在那里反复“调模型→执行工具→再调模型”直到模型给出最终回复。
         if ctx.visible_run_started_at is None:
             ctx.visible_run_started_at = time.time()
         await self._runtime_events().run_status_changed(
@@ -1592,6 +1620,7 @@ class AgentLoop:
         return "ok"
 
     async def _state_save(self, ctx: TurnContext) -> str:
+        # 状态 SAVE：把本轮完整对话（含工具结果）原子写入 history.jsonl，并清理检查点。
         turn_continuation.prepare_save_boundary(ctx)
 
         if (
@@ -1631,6 +1660,7 @@ class AgentLoop:
         return "ok"
 
     async def _state_respond(self, ctx: TurnContext) -> str:
+        # 状态 RESPOND：把最终回复组装成 OutboundMessage，稍后由 run()/bus 发回 Channel。
         if ctx.suppress_response:
             ctx.outbound = None
             return "ok"
@@ -1845,7 +1875,7 @@ class AgentLoop:
                     "timestamp": datetime.now().isoformat(),
                 }
             )
-
+        # 将历史消息拼接到当前消息末尾
         overlap = 0
         max_overlap = min(len(session.messages), len(restored_messages))
         for size in range(max_overlap, 0, -1):

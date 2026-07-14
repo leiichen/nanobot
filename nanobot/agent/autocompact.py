@@ -64,7 +64,7 @@ class AutoCompact:
 
     def check_expired(self, schedule_background: Callable[[Coroutine], None],
                       active_session_keys: Collection[str] = ()) -> None:
-        """Schedule archival for idle sessions, skipping those with in-flight agent tasks."""
+        """归档空闲会话，跳过正在处理任务的会话"""
         now = datetime.now()
         for info in self.sessions.list_sessions():
             key = info.get("key", "")

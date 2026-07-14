@@ -76,7 +76,7 @@ prepare_file_edit_tracker = _prepare_file_edit_tracker
 @dataclass(slots=True)
 class AgentRunSpec:
     """Configuration for a single agent execution."""
-
+    # 一次 agent 执行的输入包：由 loop.py 组装（消息+工具+模型+超时+回调），传入 AgentRunner.run()。
     initial_messages: list[dict[str, Any]]
     tools: ToolRegistry
     model: str
@@ -109,7 +109,7 @@ class AgentRunSpec:
 @dataclass(slots=True)
 class AgentRunResult:
     """Outcome of a shared agent execution."""
-
+    # 执行结果：最终回复内容、完整消息列表、用过的工具、token 用量等，回传给 loop。
     final_content: str | None
     messages: list[dict[str, Any]]
     tools_used: list[str] = field(default_factory=list)
@@ -122,6 +122,8 @@ class AgentRunResult:
 
 class AgentRunner:
     """Run a tool-capable LLM loop without product-layer concerns."""
+    # LLM 对话循环执行器：反复“调用 provider → 解析工具调用 → 执行工具 → 再调用 provider”，
+    # 直到模型不再要求工具、给出最终文本回复。loop.py 的 _run_agent_loop 在状态 RUN 调用它。
 
     def __init__(self, provider: LLMProvider):
         self.provider = provider
@@ -294,6 +296,8 @@ class AgentRunner:
         return True
 
     async def run(self, spec: AgentRunSpec) -> AgentRunResult:
+        # 公共入口：套上生命周期 hook（before_run/after_run/on_error/on_finally）和异常处理；
+        # 真正的多轮对话循环在 _run_core() 里。
         hook = spec.hook or AgentHook()
         messages = list(spec.initial_messages)
         context = AgentRunHookContext(messages=deepcopy(messages))
@@ -347,6 +351,14 @@ class AgentRunner:
         hook: AgentHook,
         messages: list[dict[str, Any]],
     ) -> AgentRunResult:
+        # ===== 核心对话循环 =====
+        # for iteration in range(max_iterations):
+        #   1. prepare_for_model: 为模型准备消息（可能压缩/修复，但不改持久化副本）
+        #   2. _request_model: 调用 LLM provider，拿到回复 + tool_calls
+        #   3. 若 should_execute_tools: 把 assistant+tool_calls 追加进消息 → _execute_tools
+        #      → 把工具结果追加进消息 → continue（进入下一轮再问模型）
+        #   4. 若没有工具调用: 收尾内容、处理空回复/截断恢复/中途注入，最后 break 退出
+        # 退出循环后返回 AgentRunResult。
         final_content: str | None = None
         tools_used: list[str] = []
         usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
@@ -374,12 +386,14 @@ class AgentRunner:
             inflight_start_index=len(spec.initial_messages),
         )
 
+        # —— 多轮对话主循环开始 ——
         for iteration in range(spec.max_iterations):
             try:
                 # Keep the persisted conversation untouched. Context governance
                 # may repair or compact historical messages for the model, but
                 # those synthetic edits must not shift the append boundary used
                 # later when the caller saves only the new turn.
+                # (步骤1：为模型准备消息——可能压缩历史，但不改写持久化副本)
                 messages_for_model = self.context_governor.prepare_for_model(
                     governance_config,
                     messages,
@@ -412,6 +426,7 @@ class AgentRunner:
                 session_key=spec.session_key,
             )
             await hook.before_iteration(context)
+            # 步骤2：调用 LLM provider，拿到回复内容 + 工具调用(tool_calls)
             response = await self._request_model(spec, messages_for_model, hook, context)
             context.response = response
             context.tool_calls = list(response.tool_calls)
@@ -430,6 +445,7 @@ class AgentRunner:
                 await hook.emit_reasoning_end()
                 context.streamed_reasoning = True
 
+            # 步骤3：模型要求调用工具 → 执行工具后 continue（进入下一轮再问模型）
             if response.should_execute_tools:
                 context.tool_calls = list(response.tool_calls)
                 if hook.wants_streaming():
@@ -456,6 +472,7 @@ class AgentRunner:
 
                 await hook.before_execute_tools(context)
 
+                # 执行这一批工具调用（_execute_tools 内部按批次、可并发地跑每个工具）
                 results, new_events, fatal_error = await self._execute_tools(
                     spec,
                     response.tool_calls,
@@ -525,6 +542,8 @@ class AgentRunner:
                 await hook.after_iteration(context)
                 continue
 
+            # —— 步骤4：没有要执行的工具 → 收尾。处理空回复重试、截断(length)恢复、
+            # 中途注入消息，然后组装最终 assistant 消息并退出循环。
             if response.has_tool_calls:
                 logger.warning(
                     "Ignoring tool calls under finish_reason='{}' for {}",
@@ -739,6 +758,8 @@ class AgentRunner:
         *,
         malformed_retry: bool = False,
     ):
+        # 向 LLM provider 发送一次请求：处理超时、流式/进度回调、重试与错误占位。
+        # 返回 LLMResponse（含 content、tool_calls、finish_reason、usage 等）。
         timeout_s: float | None = spec.llm_timeout_s
         if timeout_s is None:
             # Default to a finite timeout to avoid per-session lock starvation when an LLM
@@ -1132,6 +1153,8 @@ class AgentRunner:
         external_lookup_counts: dict[str, int],
         workspace_violation_counts: dict[str, int],
     ) -> tuple[list[Any], list[dict[str, str]], BaseException | None]:
+        # 批量执行工具调用：按批次(_partition_tool_batches)切分，批次内可并发(asyncio.gather)。
+        # 返回 (每个工具的结果, 每个工具的事件, 第一个致命错误)。
         batches = self._partition_tool_batches(spec, tool_calls)
         tool_results: list[tuple[Any, dict[str, str], BaseException | None]] = []
         for batch in batches:
@@ -1169,6 +1192,8 @@ class AgentRunner:
         external_lookup_counts: dict[str, int],
         workspace_violation_counts: dict[str, int],
     ) -> tuple[Any, dict[str, str], BaseException | None]:
+        # 执行单个工具调用：含重复外链查询拦截、SSRF/工作区越界判定、错误处理。
+        # 返回 (工具结果, 事件dict, 致命错误|None)。
         hint = "\n\n[Analyze the error above and try a different approach.]"
         lookup_error = repeated_external_lookup_error(
             tool_call.name,

@@ -1114,7 +1114,7 @@ async def connect_missing_servers(state: Any, registry: ToolRegistry) -> None:
 
 async def reload_servers(state: Any, registry: ToolRegistry) -> dict[str, Any]:
     """Reconcile live MCP connections with the current config file."""
-    async with _reload_lock(state):
+    async with _reload_lock(state): # 加锁，防止并发重载
         try:
             from nanobot.config.loader import load_config, resolve_config_env_vars
 
