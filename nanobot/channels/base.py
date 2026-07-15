@@ -225,9 +225,10 @@ class BaseChannel(ABC):
         session_key: str | None = None,
         is_dm: bool = False,
     ) -> None:
-        """Handle an incoming message: check permissions, issue pairing codes in DMs, or forward to bus."""
+        """统一处理各 Channel 的入站消息：校验权限、处理私聊配对，并转发到消息队列。"""
         if not self.is_allowed(sender_id):
             if is_dm:
+                # 生成配对码，并回复给用户。用户可让管理员使用该配对码批准访问。
                 code = generate_code(self.name, str(sender_id))
                 await self.send(
                     OutboundMessage(

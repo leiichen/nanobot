@@ -937,7 +937,7 @@ class AgentLoop:
         return result.final_content, result.tools_used, result.messages, result.stop_reason, result.had_injections
 
     async def run(self) -> None:
-        """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
+        """运行智能体主循环，将消息分派为任务，以便及时响应 /stop 命令。"""
         self._running = True
         try:
             await self._connect_mcp()
@@ -954,8 +954,8 @@ class AgentLoop:
                     )
                     continue
                 except asyncio.CancelledError:
-                    # Preserve real task cancellation so shutdown can complete cleanly.
-                    # Only ignore non-task CancelledError signals that may leak from integrations.
+                    # 保留真正的任务取消信号，确保程序能够正常关闭。
+                    # 仅忽略集成组件可能泄漏的非任务 CancelledError 信号。
                     if not self._running or asyncio.current_task().cancelling():
                         raise
                     continue
@@ -993,8 +993,8 @@ class AgentLoop:
                 # 如果这个会话已经有活跃的等待队列（即有一个任务正在处理这个会话）
                 # 将消息路由到该队列进行中途注入，而不是创建竞争任务。
                 if effective_key in self._pending_queues:
-                    # Non-priority commands must not be queued for injection;
-                    # dispatch them directly (same pattern as priority commands).
+                    # 非优先级命令/history、/model不能进入注入队列；应像优先级命令一样直接分派。
+                    # 找到对应命令的执行函数
                     if self.commands.is_dispatchable_command(raw):
                         await self._dispatch_command_inline(
                             msg, effective_key, raw,
@@ -1020,8 +1020,7 @@ class AgentLoop:
                             effective_key,
                         )
                         continue
-                # Compute the effective session key before dispatching
-                # This ensures /stop command can find tasks correctly when unified session is enabled
+                # 分派前计算有效会话键，确保启用统一会话时 /stop 命令能正确找到任务。
                 task = asyncio.create_task(self._dispatch(msg))
                 self._active_tasks.setdefault(effective_key, []).append(task)
                 task.add_done_callback(
@@ -1031,7 +1030,7 @@ class AgentLoop:
                     else None
                 )
         finally:
-            # MCP stdio transports use AnyIO cancel scopes; close them from the task that opened them.
+            # MCP stdio 传输使用 AnyIO 取消作用域，因此要在打开它们的任务中关闭。
             await self.close_mcp()
 
     async def _dispatch(self, msg: InboundMessage) -> None:

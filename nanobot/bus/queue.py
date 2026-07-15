@@ -14,11 +14,14 @@ class MessageBus:
     """
 
     def __init__(self):
+        # 入站队列：Channel 写入，AgentLoop.run() 消费。
         self.inbound: asyncio.Queue[InboundMessage] = asyncio.Queue()
+        # 出站队列：AgentLoop 写入，ChannelManager 消费并发送到对应平台。
         self.outbound: asyncio.Queue[OutboundMessage] = asyncio.Queue()
 
     async def publish_inbound(self, msg: InboundMessage) -> None:
         """Publish a message from a channel to the agent."""
+        # Channel 不直接调用 Agent，统一进入队列可以隔离不同平台的收消息速度。
         await self.inbound.put(msg)
 
     async def consume_inbound(self) -> InboundMessage:
@@ -27,6 +30,7 @@ class MessageBus:
 
     async def publish_outbound(self, msg: OutboundMessage) -> None:
         """Publish a response from the agent to channels."""
+        # 回复仍然走总线，由 ChannelManager 根据 msg.channel 选择发送端。
         await self.outbound.put(msg)
 
     async def consume_outbound(self) -> OutboundMessage:

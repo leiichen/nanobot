@@ -123,7 +123,7 @@ class AgentRunResult:
 class AgentRunner:
     """Run a tool-capable LLM loop without product-layer concerns."""
     # LLM 对话循环执行器：反复“调用 provider → 解析工具调用 → 执行工具 → 再调用 provider”，
-    # 直到模型不再要求工具、给出最终文本回复。loop.py 的 _run_agent_loop 在状态 RUN 调用它。
+    # 直到模型不再要求工具、给出最终文本回复。loop.py 的 _state_run 会间接调用它。
 
     def __init__(self, provider: LLMProvider):
         self.provider = provider

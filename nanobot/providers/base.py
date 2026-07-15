@@ -47,6 +47,7 @@ def resolve_stream_idle_timeout_s(
 @dataclass
 class ToolCallRequest:
     """A tool call request from the LLM."""
+    # Provider 将各家模型的工具调用格式统一转换成这个结构，Runner 无需关心厂商差异。
     id: str
     name: str
     arguments: Any
@@ -149,6 +150,7 @@ def tool_arguments_json_for_replay(arguments: Any) -> str:
 @dataclass
 class LLMResponse:
     """Response from an LLM provider."""
+    # Provider 的统一返回值：普通回答读 content，需要工具时读 tool_calls。
     content: str | None
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
@@ -192,6 +194,8 @@ _SYNTHETIC_USER_CONTENT = "(conversation continued)"
 
 class LLMProvider(ABC):
     """Base class for LLM providers."""
+
+    # AgentRunner 只依赖这个抽象；具体厂商负责请求格式、鉴权、流式解析和错误转换。
 
     supports_progress_deltas = False
 

@@ -40,11 +40,11 @@ class InboundMessage:
 
 @dataclass
 class OutboundMessage:
-    """Message to send to a chat channel.
+    """发送到聊天渠道的消息。
 
-    ``event`` carries internal runtime/UI semantics. ``metadata`` is reserved
-    for channel routing context (``message_id``, thread ids, etc.) and optional
-    ``OUTBOUND_META_AGENT_UI`` blobs for rich clients.
+    ``event`` 用于承载内部运行时和 UI 语义。``metadata`` 保留用于存储渠道路由信息
+    （如 ``message_id``、话题 ID 等），以及供富客户端使用的可选
+    ``OUTBOUND_META_AGENT_UI`` 数据。
     """
 
     channel: str

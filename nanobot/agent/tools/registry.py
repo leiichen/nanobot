@@ -78,6 +78,7 @@ class ToolRegistry:
         if self._cached_definitions is not None:
             return self._cached_definitions
 
+        # 将 Python Tool 转成模型能识别的 JSON schema；模型据此决定工具名和参数。
         definitions = [tool.to_schema() for tool in self._tools.values()]
         builtins: list[dict[str, Any]] = []
         mcp_tools: list[dict[str, Any]] = []
@@ -99,6 +100,7 @@ class ToolRegistry:
         params: Any,
     ) -> tuple[Tool | None, Any, str | None]:
         """Resolve, cast, and validate one tool call."""
+        # 执行前依次完成：精确查找工具 → 整理参数形状 → 类型转换 → schema 校验。
         tool = self._tools.get(name)
         if not tool:
             suggestion = self._suggest_name(str(name))
@@ -171,6 +173,7 @@ class ToolRegistry:
 
         try:
             assert tool is not None  # guarded by prepare_call()
+            # 所有具体工具最终都在这里通过统一的异步接口执行。
             result = await tool.execute(**params)
             if is_tool_error_result(name, result):
                 return ToolResult.error(str(result) + hint)
