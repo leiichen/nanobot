@@ -968,6 +968,7 @@ class AgentLoop:
                 # MCP 热重载
                 if await agent_context.handle_runtime_control(self, msg, self.tools):
                     continue
+                # /stop这种斜杠命令
                 if self.commands.is_priority(raw):
                     await self._dispatch_command_inline(
                         msg, effective_key, raw,
@@ -990,7 +991,7 @@ class AgentLoop:
                         break
                 if deferred:
                     continue
-                # 如果这个会话已经有活跃的等待队列（即有一个任务正在处理这个会话）
+                # 如果这个会话已经有活跃的等待队列（即有一个任务正在处理这个会话），将新消息交给当前正在运行的 Agent，作为中途追问
                 # 将消息路由到该队列进行中途注入，而不是创建竞争任务。
                 if effective_key in self._pending_queues:
                     # 非优先级命令/history、/model不能进入注入队列；应像优先级命令一样直接分派。
@@ -1048,8 +1049,6 @@ class AgentLoop:
             async with lock, gate:
                 # Only the task that owns the session lock may publish the
                 # active mid-turn injection queue for this session.
-                # 这里是防止用户在不同设备同时在一个会话发消息，会在队列中等待 
-                # uid + 会话id
                 pending = asyncio.Queue(maxsize=20)
                 self._pending_queues[session_key] = pending
                 # 设置流式响应回调
@@ -1062,7 +1061,7 @@ class AgentLoop:
 
                         def _current_stream_id() -> str:
                             return f"{stream_base_id}:{stream_segment}"
-
+                        # 每收到一小段输出，就发送到出站消息队列
                         async def on_stream(delta: str) -> None:
                             await self.bus.publish_outbound(
                                 outbound_message_for_event(
@@ -1075,7 +1074,7 @@ class AgentLoop:
                                     metadata=msg.metadata,
                                 )
                             )
-
+                        # 一段流式输出结束时，发送结束事件
                         async def on_stream_end(*, resuming: bool = False) -> None:
                             nonlocal stream_segment
                             await self.bus.publish_outbound(
@@ -1340,7 +1339,7 @@ class AgentLoop:
         # RESTORE→COMPACT→COMMAND→BUILD→RUN→SAVE→RESPOND→DONE。每个状态对应一个
         # _state_xxx 方法，返回事件(如 "ok")，再由 _TRANSITIONS 表决定下一跳。
         self._refresh_provider_snapshot()
-
+        # 处理子Agent的返回信息，注入到上下文
         if msg.channel == "system":
             return await self._process_system_message(
                 msg,
