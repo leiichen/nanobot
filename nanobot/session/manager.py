@@ -159,6 +159,7 @@ class Session:
         History is sliced by message count first (``max_messages``), then by
         token budget from the tail (``max_tokens``) when provided.
         """
+        # 跳过已归档历史
         unconsolidated = self.messages[self.last_consolidated:]
         max_messages = max_messages if max_messages > 0 else FILE_MAX_MESSAGES
         start_idx = recent_message_start_index(
@@ -170,6 +171,7 @@ class Session:
 
         # Avoid starting mid-turn when possible, except for proactive
         # assistant deliveries that the user may be replying to.
+        # 从user对话开始
         for i, message in enumerate(sliced):
             if message.get("role") == "user":
                 start = i

@@ -103,6 +103,7 @@ class AutoCompact:
             self._archiving.discard(key)
             self._summaries.pop(key, None)
             return session, None
+        # 会话正在被压缩or已超过空闲TTL
         if key in self._archiving or self._is_expired(session.updated_at):
             logger.info("Auto-compact: reloading session {} (archiving={})", key, key in self._archiving)
             session = self.sessions.get_or_create(key)

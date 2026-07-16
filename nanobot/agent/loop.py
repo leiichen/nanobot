@@ -1237,7 +1237,7 @@ class AgentLoop:
         logger.info("Processing system message from {}", msg.sender_id)
         key = msg.session_key_override or f"{channel}:{chat_id}"
         session = self.sessions.get_or_create(key)
-        # 恢复会话历史上下文
+        # 持久化“上一次中断任务的恢复结果”
         if self._restore_runtime_checkpoint(session):
             self.sessions.save(session)
         # 系统被动崩溃时，追加一条错误信息
@@ -1479,6 +1479,7 @@ class AgentLoop:
         # ensure it exists in case this handler is invoked independently.
         if ctx.session is None:
             ctx.session = self.sessions.get_or_create(ctx.session_key)
+        # 发布会话开始事件
         await self._runtime_events().session_turn_started(msg, ctx.session_key)
         self.workspace_scopes.persist_message_scope(ctx.session, msg)
         # 恢复运行的检查点
@@ -1534,6 +1535,7 @@ class AgentLoop:
 
     async def _state_build(self, ctx: TurnContext) -> str:
         # 状态 BUILD：组装发给 LLM 的消息列表——历史 + 系统提示 + 记忆/技能 + 本轮用户消息。
+        # 不是临时对话，则归档记忆、生成历史摘要
         if not ctx.ephemeral:
             await self.consolidator.maybe_consolidate_by_tokens(
                 ctx.session,
@@ -1555,6 +1557,7 @@ class AgentLoop:
             "max_tokens": self._replay_token_budget(),
             "extend_to_user": False,
         }
+        # 从历史上下文提取干净的会话给LLM
         ctx.history = ctx.session.get_history(**_hist_kwargs)
         self._runtime_events().record_turn_runtime(
             ctx.session_key,
