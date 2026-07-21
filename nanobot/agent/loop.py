@@ -827,6 +827,7 @@ class AgentLoop:
             # Block if nothing drained but sub-agents spawned in this dispatch
             # are still running.  Keeps the runner loop alive so subsequent
             # completions are injected in-order rather than dispatched separately.
+            # 如果队列暂时为空，但当前会话还有子 Agent 正在运行，会堵塞等待队列出现新消息（子Agent的结果会放到队列中）
             if (not items
                     and session is not None
                     and self.subagents.get_running_count_by_session(session.key) > 0):
@@ -1557,7 +1558,7 @@ class AgentLoop:
             "max_tokens": self._replay_token_budget(),
             "extend_to_user": False,
         }
-        # 从历史上下文提取干净的会话给LLM
+        # 从历史上下文提取干净的会话给LLM，这里不包括已归档的历史
         ctx.history = ctx.session.get_history(**_hist_kwargs)
         self._runtime_events().record_turn_runtime(
             ctx.session_key,

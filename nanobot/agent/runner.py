@@ -393,7 +393,7 @@ class AgentRunner:
                 # may repair or compact historical messages for the model, but
                 # those synthetic edits must not shift the append boundary used
                 # later when the caller saves only the new turn.
-                # (步骤1：为模型准备消息——可能压缩历史，但不改写持久化副本)
+                # (步骤1：补全缺失的tool result) 虽然resore阶段恢复检查点时对为尚未完成的工具调用补一条错误结果，因此这里是兜底设计
                 messages_for_model = self.context_governor.prepare_for_model(
                     governance_config,
                     messages,

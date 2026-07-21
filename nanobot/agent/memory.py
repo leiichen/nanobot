@@ -937,11 +937,13 @@ class Consolidator:
 
             budget = self._input_token_budget
             target = int(budget * self.consolidation_ratio)
+            # 检查消息数量是否超过限制
             last_summary = await self._consolidate_replay_overflow(
                 session,
                 replay_max_messages,
             )
             try:
+                # 检查剩余消息的总token是否超过限制
                 estimated, source = self.estimate_session_prompt_tokens(
                     session,
                 )
